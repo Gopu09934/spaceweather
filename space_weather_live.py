@@ -766,88 +766,332 @@ def animated_wave(d, x1, y1, x2, y2, n, color=CYAN):
         pts.append((x,y))
     d.line(pts,fill=color,width=2)
 
+# ============================================================
+# SHARED DOCUMENTARY LAYOUT — used by every dashboard so all six
+# panels stay perfectly aligned (metallic header, corner-bracket
+# quadrant grid, gold ticker footer). Only the accent color and
+# panel content change from one dashboard to the next.
+# ============================================================
+ROW_A=(12,82,660,358); ROW_B=(672,82,1268,358)
+ROW_C=(12,368,660,650); ROW_D=(672,368,1268,650)
+
+def documentary_header(img,n,title1,title2,glow=(255,190,80)):
+    """Brushed-steel title bar shared by all dashboards for a consistent look."""
+    grad=metallic_header_bg(W,72,n); img.paste(grad,(0,0))
+    d=ImageDraw.Draw(img)
+    w1=d.textlength(title1,font=F_DISPLAY_XL)
+    total_w=w1+d.textlength(" "+title2,font=F_DISPLAY_XL)
+    sx=(W-total_w)//2
+    for off in range(6,0,-2):
+        d.text((sx-off,18-off//3),title1,font=F_DISPLAY_XL,fill=glow)
+    d.text((sx,18),title1,font=F_DISPLAY_XL,fill=(20,16,10))
+    d.text((sx+w1+14,18),title2,font=F_DISPLAY_XL,fill=(20,16,10))
+    return d
+
 def dashboard1(n):
-    img=Image.new("RGB",(W,H),BG); d=ImageDraw.Draw(img)
-    for x,y,r in STARS: d.ellipse((x-r,y-r,x+r,y+r),fill=(100,100,100))
-    header(d,"SPACE WEATHER LIVE","NOAA SPACE WEATHER PREDICTION CENTER",CYAN,1)
-    panel(d,(12,82,300,390),"THE SUN",YELLOW); panel(d,(12,400,300,650),"SOLAR FLARE (X-RAY)",YELLOW)
-    panel(d,(310,82,755,390),"SOLAR WIND",CYAN); panel(d,(765,82,1268,305),"GEOMAGNETIC ACTIVITY",GREEN)
-    panel(d,(765,315,1268,510),"AURORA (OVAL)",GREEN); panel(d,(310,400,530,650),"PROTON FLUX (>10 MeV)",CYAN)
-    panel(d,(540,400,755,650),"ELECTRON FLUX (>2 MeV)",PURPLE); panel(d,(765,520,1268,650),"LATEST NOAA ALERTS",RED)
-    draw_sun(img,d,155,220,105,n)
-    d.text((28,352),"ACTIVE SOLAR REGIONS",font=F_XS,fill=WHITE); live_dot(d,202,360,n,YELLOW); d.text((213,347),"LIVE",font=F_M,fill=YELLOW)
-    cards=[("SPEED",val(DATA["speed"],0," km/s"),CYAN),("DENSITY",val(DATA["density"],1," p/cm³"),CYAN),("Bz",val(DATA["bz"],1," nT"),RED if DATA["bz"] is not None and DATA["bz"]<0 else CYAN),("Bt",val(DATA["bt"],1," nT"),CYAN)]
+    img=Image.new("RGB",(W,H),(6,6,8))
+    d=documentary_header(img,n,"SPACE WEATHER","LIVE OVERVIEW",glow=(90,200,255))
+    for box in (ROW_A,ROW_B,ROW_C,ROW_D):
+        corner_bracket_panel(d,box,accent=CYAN)
+
+    # Panel A — The Sun (real NASA SDO image)
+    x1,y1,x2,y2=ROW_A
+    d.text((x1+18,y1+16),"THE SUN — LIVE DISK",font=font(22,True),fill=WHITE)
+    d.text((x1+18,y1+70),"CURRENT FLARE CLASS",font=F_S,fill=STEEL_DK)
+    d.text((x1+18,y1+96),DATA["flare"],font=display_font(46),fill=YELLOW)
+    d.text((x1+18,y1+165),"SUNSPOT NUMBER",font=F_S,fill=STEEL_DK)
+    d.text((x1+18,y1+191),val(DATA.get("sunspot"),0),font=display_font(38),fill=WHITE)
+    kp0=DATA["kp"]
+    d.text((x1+18,y1+245),f"Planetary Kp {val(kp0)} — {kp_status(kp0)}",font=F_S,
+           fill=GREEN if (kp0 or 0)<4 else ORANGE)
+    tcx,tcy,tr=x2-165,y1+(y2-y1)//2,100
+    draw_sun(img,d,tcx,tcy,tr,n)
+    d=ImageDraw.Draw(img)
+
+    # Panel B — Solar Wind & Magnetic Field
+    x1,y1,x2,y2=ROW_B
+    paste_vertical_label(img,x1+6,y1+30,"Solar Wind & IMF",font(20,True),WHITE)
+    d=ImageDraw.Draw(img)
+    d.text((x1+18,y1+16),"NOAA RTSW • LIVE PLASMA & FIELD DATA",font=F_XS,fill=GOLD)
+    cards=[("SPEED",val(DATA["speed"],0," km/s"),CYAN),
+           ("DENSITY",val(DATA["density"],1," p/cm³"),CYAN),
+           ("Bz GSM",val(DATA["bz"],1," nT"),RED if DATA["bz"] is not None and DATA["bz"]<0 else CYAN),
+           ("Bt",val(DATA["bt"],1," nT"),BLUE)]
     for i,(lab,v,col) in enumerate(cards):
-        x=322+(i%2)*210; y=120+(i//2)*80; d.rounded_rectangle((x,y,x+195,y+68),radius=6,fill=(4,11,23),outline=GRID,width=1)
-        d.text((x+12,y+8),lab,font=F_XS,fill=MUTED); d.text((x+12,y+32),v,font=font(18,True),fill=col)
-    hist=DATA["history"]; d.text((322,286),"SOLAR WIND SPEED — ROLLING HISTORY",font=F_XS,fill=MUTED); graph(d,(322,304,743,370),[h[1] for h in hist],CYAN); animated_scan(d,322,304,743,370,n,CYAN,1)
-    kp=DATA["kp"]; d.text((785,120),"PLANETARY Kp",font=F_XS,fill=MUTED); d.text((785,145),val(kp),font=F_B,fill=YELLOW); d.text((930,145),kp_status(kp),font=F_M,fill=GREEN if (kp or 0)<5 else ORANGE)
-    vals=[h[3] for h in hist[-7:] if h[3] is not None]
-    for i,v in enumerate(vals):
-        x=815+i*55; bh=28+int(min(v,9)*15); col=GREEN if v<4 else YELLOW if v<5 else ORANGE if v<7 else RED; d.rectangle((x,260-bh,x+35,260),fill=col); d.text((x+5,246-bh),f"{v:.1f}",font=F_XS,fill=WHITE)
-    live_dot(d,785,282,n,GREEN); d.text((795,274),"Kp trend • latest NOAA values",font=F_XS,fill=MUTED)
-    aurora(img,d,(780,340,1115,500),n); state="QUIET" if kp is None or kp<2 else "UNSETTLED" if kp<4 else "ACTIVE"
-    d.text((1130,350),"ACTIVITY",font=F_XS,fill=MUTED); d.text((1130,380),state,font=F_M,fill=GREEN if state=="QUIET" else YELLOW); d.text((1130,430),"LIVE Kp",font=F_XS,fill=MUTED); d.text((1130,448),val(kp),font=F_M,fill=WHITE)
-    d.text((28,428),"CURRENT CLASS",font=F_XS,fill=MUTED); d.text((28,453),DATA["flare"],font=F_B,fill=YELLOW); x=DATA["xray"]; d.text((155,430),"X-RAY FLUX",font=F_XS,fill=MUTED); d.text((155,455),f"{x:.2e} W/m²" if x else "--",font=F_S,fill=WHITE)
-    graph(d,(28,492,285,625),[h[4] for h in hist],YELLOW); animated_scan(d,28,492,285,625,n,YELLOW,1); scale_xray(d,28,633,250,DATA["flare"])
-    graph(d,(322,458,518,620),[h[5] for h in hist],CYAN); graph(d,(552,458,743,620),[h[6] for h in hist],PURPLE); animated_scan(d,322,458,518,620,n,CYAN,1); animated_scan(d,552,458,743,620,n,PURPLE,1)
-    d.text((322,430),"NOAA GOES PROTONS >10 MeV",font=F_XS,fill=MUTED); d.text((552,430),"NOAA GOES ELECTRONS >2 MeV",font=F_XS,fill=MUTED)
-    d.text((322,625),val(DATA["proton"],2," pfu"),font=F_XS,fill=CYAN); d.text((552,625),val(DATA["electron"],2," e/(cm²·s·sr)"),font=F_XXS,fill=PURPLE); alert_box(d,(785,550,1248,625)); footer(d,n); return img
+        cx=x1+65+(i%2)*250; cy=y1+55+(i//2)*95
+        d.rounded_rectangle((cx,cy,cx+225,cy+75),radius=6,fill=(14,14,16),outline=(70,70,70),width=1)
+        d.text((cx+14,cy+10),lab,font=F_S,fill=STEEL_DK)
+        d.text((cx+14,cy+32),v,font=display_font(26),fill=col)
+    d.text((x1+65,y1+250),f"PLANETARY Kp {val(kp0)} — {kp_status(kp0)}",font=F_M,fill=YELLOW)
+
+    # Panel C — Live History
+    x1,y1,x2,y2=ROW_C
+    paste_vertical_label(img,x1+6,y1+30,"Live History",font(20,True),WHITE)
+    d=ImageDraw.Draw(img)
+    d.text((x1+18,y1+16),"NOAA SWPC • ROLLING FEED HISTORY",font=F_XS,fill=GOLD)
+    hist=DATA["history"]; gx1,gx2=x1+60,x2-25
+    d.text((gx1,y1+38),"SOLAR WIND SPEED (km/s)",font=F_XS,fill=CYAN)
+    graph(d,(gx1,y1+55,gx2,y1+150),[h[1] for h in hist],CYAN); animated_scan(d,gx1,y1+55,gx2,y1+150,n,CYAN,1)
+    d.text((gx1,y1+163),"GOES X-RAY FLUX",font=F_XS,fill=YELLOW)
+    graph(d,(gx1,y1+180,gx2,y1+265),[h[4] for h in hist],YELLOW); animated_scan(d,gx1,y1+180,gx2,y1+265,n,YELLOW,1)
+
+    # Panel D — Aurora Oval (real NASA EPIC Earth image)
+    x1,y1,x2,y2=ROW_D
+    paste_vertical_label(img,x1+6,y1+30,"Aurora Oval",font(20,True),WHITE)
+    d=ImageDraw.Draw(img)
+    d.text((x1+18,y1+16),"NASA EPIC/DSCOVR • GEOMAGNETIC VIEW",font=F_XS,fill=GOLD)
+    aurora(img,d,(x1+60,y1+30,x2-20,y2-55),n)
+    d=ImageDraw.Draw(img)
+    scale_kp(d,x1+70,y2-28,x2-x1-140,kp0)
+
+    documentary_ticker(img,d,n)
+    d=ImageDraw.Draw(img)
+    return img
 
 def dashboard2(n):
-    img=Image.new("RGB",(W,H),(16,16,20)); d=ImageDraw.Draw(img)
-    header(d,"SOLAR ACTIVITY MONITOR","SUNSPOT • GOES X-RAY • SOLAR ACTIVITY",YELLOW,2)
-    panel(d,(12,82,365,360),"SUNSPOT ACTIVITY",YELLOW); panel(d,(375,82,765,360),"SOLAR DISK",ORANGE); panel(d,(775,82,1268,360),"CURRENT SOLAR CONDITIONS",YELLOW)
-    panel(d,(12,370,635,650),"GOES X-RAY HISTORY",YELLOW); panel(d,(645,370,1268,650),"FLARE / GEOMAGNETIC SUMMARY",ORANGE)
-    d.text((38,130),"CURRENT SUNSPOT NUMBER",font=F_S,fill=MUTED); d.text((38,165),val(DATA.get("sunspot"),0),font=font(48,True),fill=WHITE)
-    d.text((38,245),"NOAA DAILY SUNSPOT REPORT",font=F_XS,fill=YELLOW); d.text((38,275),"Live value shown when the NOAA report feed is available.",font=F_XS,fill=MUTED)
-    draw_sun(img,d,570,220,125,n); animated_sweep(d,(395,95,745,345),n,ORANGE); live_dot(d,735,103,n,ORANGE); d.text((410,330),"LIVE SOLAR VISUALIZATION • NOAA MEASUREMENTS BELOW",font=F_XS,fill=MUTED)
-    vals=[("X-RAY",DATA["flare"],YELLOW),("Kp",val(DATA["kp"]),YELLOW),("SOLAR WIND",val(DATA["speed"],0," km/s"),CYAN),("Bz",val(DATA["bz"],1," nT"),RED if DATA["bz"] is not None and DATA["bz"]<0 else CYAN),("DENSITY",val(DATA["density"],1," p/cm³"),CYAN),("SUNSPOTS",val(DATA.get("sunspot"),0),WHITE)]
-    for i,(lab,v,col) in enumerate(vals):
-        x=795+(i%2)*220; y=125+(i//2)*70; d.text((x,y),lab,font=F_XS,fill=MUTED); d.text((x,y+24),v,font=F_M,fill=col)
-    graph(d,(35,425,610,615),[h[4] for h in DATA["history"]],YELLOW); animated_scan(d,35,425,610,615,n,YELLOW,1); d.text((35,620),"GOES X-RAY • 1-DAY FEED • LIVE",font=F_XS,fill=MUTED)
-    d.text((675,425),"CURRENT FLARE CLASS",font=F_S,fill=MUTED); d.text((675,455),DATA["flare"],font=font(42,True),fill=YELLOW); scale_xray(d,675,520,520,DATA["flare"])
-    d.text((675,570),"GEOMAGNETIC",font=F_S,fill=MUTED); d.text((675,595),kp_status(DATA["kp"]),font=F_M,fill=GREEN if (DATA["kp"] or 0)<4 else ORANGE); live_dot(d,1235,592,n,GREEN if (DATA["kp"] or 0)<4 else ORANGE); footer(d,n,"NOAA SWPC • GOES X-RAY • SUNSPOT REPORT"); return img
+    img=Image.new("RGB",(W,H),(6,6,8))
+    d=documentary_header(img,n,"SOLAR ACTIVITY","MONITOR",glow=(255,170,60))
+    for box in (ROW_A,ROW_B,ROW_C,ROW_D):
+        corner_bracket_panel(d,box,accent=ORANGE)
+
+    # Panel A — Sunspot Activity (real NASA SDO sun image)
+    x1,y1,x2,y2=ROW_A
+    d.text((x1+18,y1+16),"SUNSPOT ACTIVITY",font=font(22,True),fill=WHITE)
+    d.text((x1+18,y1+70),"CURRENT SUNSPOT NUMBER",font=F_S,fill=STEEL_DK)
+    d.text((x1+18,y1+96),val(DATA.get("sunspot"),0),font=display_font(46),fill=WHITE)
+    d.text((x1+18,y1+165),"CURRENT FLARE CLASS",font=F_S,fill=STEEL_DK)
+    d.text((x1+18,y1+191),DATA["flare"],font=display_font(38),fill=YELLOW)
+    xr=DATA["xray"]
+    d.text((x1+18,y1+245),f"X-ray flux {xr:.2e} W/m²" if xr else "X-ray flux --",font=F_S,fill=MUTED)
+    tcx,tcy,tr=x2-165,y1+(y2-y1)//2,100
+    draw_sun(img,d,tcx,tcy,tr,n)
+    d=ImageDraw.Draw(img)
+
+    # Panel B — Solar Disk Imagery (real dual SDO views)
+    x1,y1,x2,y2=ROW_B
+    paste_vertical_label(img,x1+6,y1+30,"Solar Disk Imagery",font(20,True),WHITE)
+    d=ImageDraw.Draw(img)
+    d.text((x1+18,y1+16),"NASA SDO • LIVE FULL-DISK IMAGERY",font=F_XS,fill=GOLD)
+    with img_lock:
+        mag=REAL_IMAGES.get("magnetogram"); cont=REAL_IMAGES.get("continuum")
+    r2=95
+    c1x,c1y=x1+165,y1+(y2-y1)//2+15
+    c2x,c2y=x2-150,y1+(y2-y1)//2+15
+    for (cxp,cyp,im,lab) in [(c1x,c1y,mag,"MAGNETOGRAM"),(c2x,c2y,cont,"CONTINUUM (VISIBLE LIGHT)")]:
+        d.ellipse((cxp-r2,cyp-r2,cxp+r2,cyp+r2),fill=(15,15,15),outline=(70,70,70),width=1)
+        if im is not None:
+            disk=im.resize((r2*2,r2*2),Image.LANCZOS)
+            img.paste(disk,(cxp-r2,cyp-r2),disk)
+            d=ImageDraw.Draw(img)
+        d.text((cxp-r2,cyp+r2+8),lab,font=F_XXS,fill=STEEL_DK)
+
+    # Panel C — GOES X-Ray History
+    x1,y1,x2,y2=ROW_C
+    paste_vertical_label(img,x1+6,y1+30,"X-Ray History",font(20,True),WHITE)
+    d=ImageDraw.Draw(img)
+    d.text((x1+18,y1+16),"GOES X-RAY • 1-DAY FEED • LIVE",font=F_XS,fill=GOLD)
+    hist=DATA["history"]; gx1,gx2=x1+60,x2-25
+    graph(d,(gx1,y1+45,gx2,y1+215),[h[4] for h in hist],YELLOW); animated_scan(d,gx1,y1+45,gx2,y1+215,n,YELLOW,1)
+    scale_xray(d,gx1,y1+250,gx2-gx1,DATA["flare"])
+
+    # Panel D — Flare & Geomagnetic Summary
+    x1,y1,x2,y2=ROW_D
+    paste_vertical_label(img,x1+6,y1+30,"Flare & Geomagnetic",font(20,True),WHITE)
+    d=ImageDraw.Draw(img)
+    d.text((x1+18,y1+16),"SUMMARY • NOAA SWPC",font=F_XS,fill=GOLD)
+    d.text((x1+65,y1+50),"CURRENT FLARE CLASS",font=F_S,fill=STEEL_DK)
+    d.text((x1+65,y1+74),DATA["flare"],font=display_font(42),fill=YELLOW)
+    scale_xray(d,x1+65,y1+150,x2-x1-140,DATA["flare"])
+    d.text((x1+65,y1+195),"GEOMAGNETIC STATUS",font=F_S,fill=STEEL_DK)
+    d.text((x1+65,y1+219),kp_status(DATA["kp"]),font=F_M,fill=GREEN if (DATA["kp"] or 0)<4 else ORANGE)
+    d.text((x1+65,y1+250),f"Sunspots {val(DATA.get('sunspot'),0)}  •  Kp {val(DATA['kp'])}",font=F_S,fill=WHITE)
+
+    documentary_ticker(img,d,n)
+    d=ImageDraw.Draw(img)
+    return img
 
 def dashboard3(n):
-    img=Image.new("RGB",(W,H),(3,9,18)); d=ImageDraw.Draw(img)
-    header(d,"SOLAR WIND MONITOR","REAL-TIME SOLAR WIND • IMF Bz / Bt",CYAN,3)
-    panel(d,(12,82,1268,235),"SOLAR WIND SPEED",CYAN); panel(d,(12,250,410,470),"WIND PARAMETERS",CYAN); panel(d,(425,250,835,470),"INTERPLANETARY MAGNETIC FIELD",BLUE); panel(d,(850,250,1268,470),"STREAM INDICATOR",ORANGE)
-    panel(d,(12,485,630,650),"SOLAR WIND SPEED HISTORY",CYAN); panel(d,(640,485,1268,650),"Bz MAGNETIC FIELD HISTORY",BLUE)
-    d.text((40,125),"CURRENT",font=F_S,fill=MUTED); d.text((40,153),val(DATA["speed"],0," km/s"),font=font(44,True),fill=CYAN)
-    speed=DATA["speed"] or 0; bar=min(100,max(0,speed/800*100)); d.rounded_rectangle((400,175,1185,202),radius=8,fill=(10,25,40),outline=GRID,width=1); d.rounded_rectangle((405,180,405+7.75*bar,197),radius=6,fill=CYAN); animated_particles(d,405,180,1180,197,n,14,CYAN)
-    d.text((40,205),"Real-time solar-wind speed from NOAA RTSW feed",font=F_XS,fill=MUTED)
-    for i,(lab,v,col) in enumerate([("DENSITY",val(DATA["density"],1," p/cm³"),CYAN),("Bz",val(DATA["bz"],1," nT"),RED if DATA["bz"] is not None and DATA["bz"]<0 else CYAN),("Bt",val(DATA["bt"],1," nT"),BLUE),("Kp",val(DATA["kp"]),YELLOW)]):
-        x=35+(i%2)*185; y=290+(i//2)*85; d.text((x,y),lab,font=F_XS,fill=MUTED); d.text((x,y+22),v,font=F_M,fill=col)
-    d.text((440,295),"Bz GSM",font=F_XS,fill=MUTED); d.text((440,320),val(DATA["bz"],1," nT"),font=F_B,fill=RED if DATA["bz"] is not None and DATA["bz"]<0 else CYAN); d.text((650,295),"Bt",font=F_XS,fill=MUTED); d.text((650,320),val(DATA["bt"],1," nT"),font=F_B,fill=BLUE)
-    south="SOUTHWARD" if DATA["bz"] is not None and DATA["bz"]<0 else "NORTHWARD / WEAK"; d.text((440,385),south,font=F_M,fill=RED if south=="SOUTHWARD" else GREEN)
-    d.text((875,295),"STREAM STATUS",font=F_XS,fill=MUTED); shock="ELEVATED" if speed>600 else "NORMAL"; d.text((875,320),shock,font=F_B,fill=ORANGE if shock=="ELEVATED" else GREEN); d.text((875,380),"Kp",font=F_XS,fill=MUTED); d.text((875,405),val(DATA["kp"]),font=F_M,fill=YELLOW); d.text((1050,380),"Bz",font=F_XS,fill=MUTED); d.text((1050,405),val(DATA["bz"],1," nT"),font=F_M,fill=RED if DATA["bz"] is not None and DATA["bz"]<0 else CYAN); d.text((875,440),"Indicator only — not an official CME detector.",font=F_XXS,fill=MUTED)
-    graph(d,(35,535,610,630),[h[1] for h in DATA["history"]],CYAN); graph(d,(665,535,1245,630),[h[2] for h in DATA["history"]],BLUE,zero=True); animated_scan(d,35,535,610,630,n,CYAN,1); animated_scan(d,665,535,1245,630,n,BLUE,1); animated_particles(d,35,535,610,630,n,8,CYAN); animated_particles(d,665,535,1245,630,n,8,BLUE); footer(d,n,"NOAA SWPC • RTSW WIND • RTSW MAG"); return img
+    img=Image.new("RGB",(W,H),(6,6,8))
+    d=documentary_header(img,n,"SOLAR WIND","MONITOR",glow=(80,170,255))
+    for box in (ROW_A,ROW_B,ROW_C,ROW_D):
+        corner_bracket_panel(d,box,accent=BLUE)
+
+    # Panel A — Wind Speed (real NASA EPIC Earth thumbnail)
+    x1,y1,x2,y2=ROW_A
+    d.text((x1+18,y1+16),"SOLAR WIND SPEED",font=font(22,True),fill=WHITE)
+    d.text((x1+18,y1+70),"CURRENT VELOCITY",font=F_S,fill=STEEL_DK)
+    d.text((x1+18,y1+96),val(DATA["speed"],0," km/s"),font=display_font(46),fill=CYAN)
+    speed=DATA["speed"] or 0; bar=min(100,max(0,speed/800*100))
+    d.rounded_rectangle((x1+18,y1+175,x2-25,y1+202),radius=8,fill=(14,14,16),outline=(70,70,70),width=1)
+    d.rounded_rectangle((x1+22,y1+179,x1+22+(x2-x1-70)*bar/100,y1+198),radius=6,fill=CYAN)
+    animated_particles(d,x1+22,y1+179,x2-30,y1+198,n,14,CYAN)
+    d.text((x1+18,y1+215),"Real-time NOAA RTSW solar-wind speed",font=F_XS,fill=MUTED)
+    with img_lock:
+        earth_thumb=REAL_IMAGES.get("earth")
+    tcx,tcy,tr=x2-110,y1+245,55
+    d.ellipse((tcx-tr,tcy-tr,tcx+tr,tcy+tr),fill=(7,20,42),outline=(30,110,170),width=1)
+    if earth_thumb is not None:
+        disk=earth_thumb.resize((tr*2,tr*2),Image.LANCZOS)
+        img.paste(disk,(tcx-tr,tcy-tr),disk)
+        d=ImageDraw.Draw(img)
+    d.text((tcx-tr,tcy+tr+6),"ARRIVAL AT EARTH",font=F_XXS,fill=STEEL_DK)
+
+    # Panel B — Magnetic Field (IMF)
+    x1,y1,x2,y2=ROW_B
+    paste_vertical_label(img,x1+6,y1+30,"Magnetic Field (IMF)",font(20,True),WHITE)
+    d=ImageDraw.Draw(img)
+    d.text((x1+18,y1+16),"NOAA RTSW MAG • LIVE",font=F_XS,fill=GOLD)
+    d.text((x1+65,y1+55),"Bz GSM",font=F_S,fill=STEEL_DK)
+    d.text((x1+65,y1+79),val(DATA["bz"],1," nT"),font=display_font(34),
+           fill=RED if DATA["bz"] is not None and DATA["bz"]<0 else CYAN)
+    d.text((x1+310,y1+55),"Bt",font=F_S,fill=STEEL_DK)
+    d.text((x1+310,y1+79),val(DATA["bt"],1," nT"),font=display_font(34),fill=BLUE)
+    south="SOUTHWARD" if DATA["bz"] is not None and DATA["bz"]<0 else "NORTHWARD / WEAK"
+    d.text((x1+65,y1+150),south,font=F_M,fill=RED if south=="SOUTHWARD" else GREEN)
+    shock="ELEVATED" if speed>600 else "NORMAL"
+    d.text((x1+65,y1+195),"STREAM STATUS",font=F_S,fill=STEEL_DK)
+    d.text((x1+65,y1+219),shock,font=F_M,fill=ORANGE if shock=="ELEVATED" else GREEN)
+    d.text((x1+65,y1+250),"Indicator only — not an official CME detector.",font=F_XXS,fill=MUTED)
+
+    # Panel C — Speed History
+    x1,y1,x2,y2=ROW_C
+    paste_vertical_label(img,x1+6,y1+30,"Speed History",font(20,True),WHITE)
+    d=ImageDraw.Draw(img)
+    d.text((x1+18,y1+16),"SOLAR WIND SPEED • ROLLING FEED",font=F_XS,fill=GOLD)
+    hist=DATA["history"]; gx1,gx2=x1+60,x2-25
+    graph(d,(gx1,y1+45,gx2,y2-25),[h[1] for h in hist],CYAN)
+    animated_scan(d,gx1,y1+45,gx2,y2-25,n,CYAN,1); animated_particles(d,gx1,y1+45,gx2,y2-25,n,8,CYAN)
+
+    # Panel D — Bz History + Kp
+    x1,y1,x2,y2=ROW_D
+    paste_vertical_label(img,x1+6,y1+30,"Bz History",font(20,True),WHITE)
+    d=ImageDraw.Draw(img)
+    d.text((x1+18,y1+16),"Bz MAGNETIC FIELD • ROLLING FEED",font=F_XS,fill=GOLD)
+    gx1,gx2=x1+60,x2-25
+    graph(d,(gx1,y1+45,gx2,y1+195),[h[2] for h in hist],BLUE,zero=True)
+    animated_scan(d,gx1,y1+45,gx2,y1+195,n,BLUE,1); animated_particles(d,gx1,y1+45,gx2,y1+195,n,8,BLUE)
+    d.text((x1+65,y1+215),f"Planetary Kp {val(DATA['kp'])} — {kp_status(DATA['kp'])}",font=F_M,fill=YELLOW)
+
+    documentary_ticker(img,d,n)
+    d=ImageDraw.Draw(img)
+    return img
 
 def dashboard4(n):
-    img=Image.new("RGB",(W,H),(1,8,16)); d=ImageDraw.Draw(img)
-    header(d,"AURORA & GEOMAGNETIC","PLANETARY Kp • AURORA OVAL",GREEN,4)
-    panel(d,(12,82,835,650),"AURORA OVAL — LIVE GEOMAGNETIC VIEW",GREEN); panel(d,(850,82,1268,275),"CURRENT CONDITIONS",GREEN); panel(d,(850,290,1268,470),"Kp TREND & SCALE",GREEN); panel(d,(850,485,1268,650),"AURORA FEED STATUS",GREEN)
-    aurora(img,d,(80,135,770,570),n); animated_particles(d,130,160,720,545,n,18,(40,220,100)); d.text((110,595),"LIVE AURORA VISUALIZATION • SYNCHRONIZED TO PLANETARY Kp",font=F_XS,fill=MUTED)
-    kp=DATA["kp"]; d.text((885,125),"PLANETARY Kp",font=F_XS,fill=MUTED); d.text((885,150),val(kp),font=font(40,True),fill=YELLOW); d.text((885,210),kp_status(kp),font=F_M,fill=GREEN if (kp or 0)<4 else ORANGE); d.text((1080,125),"Bz",font=F_XS,fill=MUTED); d.text((1080,150),val(DATA["bz"],1," nT"),font=F_M,fill=RED if DATA["bz"] is not None and DATA["bz"]<0 else CYAN); d.text((1080,205),"WIND",font=F_XS,fill=MUTED); d.text((1080,230),val(DATA["speed"],0," km/s"),font=F_M,fill=CYAN)
-    scale_kp(d,885,335,320,kp); graph(d,(885,390,1238,455),[h[3] for h in DATA["history"]],GREEN); animated_scan(d,885,390,1238,455,n,GREEN,1); d.text((885,468),"RECENT NOAA Kp VALUES • LIVE",font=F_XS,fill=MUTED)
-    d.text((885,520),"OVATION JSON FEED",font=F_XS,fill=MUTED); d.text((885,548),"AVAILABLE" if DATA.get("ovation_ok") else "UNAVAILABLE",font=F_M,fill=GREEN if DATA.get("ovation_ok") else ORANGE); d.text((885,590),"No invented probability is shown.",font=F_XS,fill=WHITE); d.text((885,612),"Use official OVATION products for probability maps.",font=F_XXS,fill=MUTED); footer(d,n,"NOAA SWPC • PLANETARY Kp • OVATION"); return img
+    img=Image.new("RGB",(W,H),(6,6,8))
+    d=documentary_header(img,n,"AURORA &","GEOMAGNETIC",glow=(90,230,120))
+    for box in (ROW_A,ROW_B,ROW_C,ROW_D):
+        corner_bracket_panel(d,box,accent=GREEN)
+
+    # Panel A — Aurora Oval, big real NASA EPIC Earth view
+    x1,y1,x2,y2=ROW_A
+    d.text((x1+18,y1+16),"AURORA OVAL — LIVE VIEW",font=font(22,True),fill=WHITE)
+    aurora(img,d,(x1+30,y1+40,x2-20,y2-30),n)
+    d=ImageDraw.Draw(img)
+    d.text((x1+18,y2-22),"NASA EPIC/DSCOVR • SYNCHRONIZED TO PLANETARY Kp",font=F_XXS,fill=STEEL_DK)
+
+    # Panel B — Current Conditions
+    x1,y1,x2,y2=ROW_B
+    paste_vertical_label(img,x1+6,y1+30,"Current Conditions",font(20,True),WHITE)
+    d=ImageDraw.Draw(img)
+    d.text((x1+18,y1+16),"NOAA SWPC • LIVE FEED",font=F_XS,fill=GOLD)
+    kp=DATA["kp"]
+    d.text((x1+65,y1+50),"PLANETARY Kp",font=F_S,fill=STEEL_DK)
+    d.text((x1+65,y1+74),val(kp),font=display_font(40),fill=YELLOW)
+    d.text((x1+65,y1+140),kp_status(kp),font=F_M,fill=GREEN if (kp or 0)<4 else ORANGE)
+    d.text((x1+320,y1+50),"Bz",font=F_S,fill=STEEL_DK)
+    d.text((x1+320,y1+74),val(DATA["bz"],1," nT"),font=display_font(30),
+           fill=RED if DATA["bz"] is not None and DATA["bz"]<0 else CYAN)
+    d.text((x1+320,y1+140),"WIND",font=F_S,fill=STEEL_DK)
+    d.text((x1+320,y1+164),val(DATA["speed"],0," km/s"),font=F_M,fill=CYAN)
+
+    # Panel C — Kp Trend & Scale
+    x1,y1,x2,y2=ROW_C
+    paste_vertical_label(img,x1+6,y1+30,"Kp Trend & Scale",font(20,True),WHITE)
+    d=ImageDraw.Draw(img)
+    d.text((x1+18,y1+16),"RECENT NOAA Kp VALUES • LIVE",font=F_XS,fill=GOLD)
+    hist=DATA["history"]; gx1,gx2=x1+60,x2-25
+    graph(d,(gx1,y1+45,gx2,y1+165),[h[3] for h in hist],GREEN); animated_scan(d,gx1,y1+45,gx2,y1+165,n,GREEN,1)
+    scale_kp(d,gx1,y1+225,gx2-gx1,DATA["kp"])
+
+    # Panel D — Aurora Feed Status
+    x1,y1,x2,y2=ROW_D
+    paste_vertical_label(img,x1+6,y1+30,"Aurora Feed Status",font(20,True),WHITE)
+    d=ImageDraw.Draw(img)
+    d.text((x1+18,y1+16),"OVATION / DATA STREAM STATUS",font=F_XS,fill=GOLD)
+    d.text((x1+65,y1+55),"OVATION JSON FEED",font=F_S,fill=STEEL_DK)
+    d.text((x1+65,y1+79),"AVAILABLE" if DATA.get("ovation_ok") else "UNAVAILABLE",font=F_M,
+           fill=GREEN if DATA.get("ovation_ok") else ORANGE)
+    d.text((x1+65,y1+140),"No invented probability is shown.",font=F_S,fill=WHITE)
+    d.text((x1+65,y1+164),"Use official OVATION products for probability maps.",font=F_XXS,fill=STEEL_DK)
+    live_dot(d,x1+70,y1+220,n,GREEN); d.text((x1+82,y1+212),"LIVE 24/7 GEOMAGNETIC MONITORING",font=F_XS,fill=GREEN)
+
+    documentary_ticker(img,d,n)
+    d=ImageDraw.Draw(img)
+    return img
 
 def dashboard5(n):
-    img=Image.new("RGB",(W,H),(7,8,12)); d=ImageDraw.Draw(img)
-    header(d,"SPACE WEATHER CENTER","NOAA ALERTS • LIVE CONDITIONS • DATA SOURCES",RED,5)
-    panel(d,(12,82,1268,245),"CURRENT NOAA ALERT / WARNING",RED); panel(d,(12,260,410,650),"LIVE CONDITIONS",CYAN); panel(d,(425,260,835,650),"SPACE WEATHER INDICATORS",YELLOW); panel(d,(850,260,1268,650),"DATA SOURCES & STREAM STATUS",GREEN)
-    alert_box(d,(40,125,1240,225)); live_dot(d,1225,140,n,RED if DATA["alert"]!="NO CURRENT ALERTS" else GREEN)
-    conditions=[("X-RAY",DATA["flare"],YELLOW),("Kp",val(DATA["kp"]),YELLOW),("WIND",val(DATA["speed"],0," km/s"),CYAN),("DENSITY",val(DATA["density"],1," p/cm³"),CYAN),("Bz",val(DATA["bz"],1," nT"),RED if DATA["bz"] is not None and DATA["bz"]<0 else CYAN),("SUNSPOTS",val(DATA.get("sunspot"),0),WHITE)]
+    img=Image.new("RGB",(W,H),(6,6,8))
+    d=documentary_header(img,n,"SPACE WEATHER","ALERT CENTER",glow=(255,90,80))
+    for box in (ROW_A,ROW_B,ROW_C,ROW_D):
+        corner_bracket_panel(d,box,accent=RED)
+
+    # Panel A — Current NOAA Alert (with real NASA SDO sun thumbnail)
+    x1,y1,x2,y2=ROW_A
+    d.text((x1+18,y1+16),"CURRENT NOAA ALERT / WARNING",font=font(22,True),fill=WHITE)
+    alert_box(d,(x1+18,y1+55,x2-18,y2-18))
+    live_dot(d,x2-35,y1+70,n,RED if DATA["alert"]!="NO CURRENT ALERTS" else GREEN)
+    with img_lock:
+        sun_thumb=REAL_IMAGES.get("sun")
+    tcx,tcy,tr=x2-58,y1+37,22
+    if sun_thumb is not None:
+        disk=sun_thumb.resize((tr*2,tr*2),Image.LANCZOS)
+        img.paste(disk,(tcx-tr,tcy-tr),disk)
+        d=ImageDraw.Draw(img)
+
+    # Panel B — Live Conditions
+    x1,y1,x2,y2=ROW_B
+    paste_vertical_label(img,x1+6,y1+30,"Live Conditions",font(20,True),WHITE)
+    d=ImageDraw.Draw(img)
+    d.text((x1+18,y1+16),"NOAA SWPC • LIVE FEED",font=F_XS,fill=GOLD)
+    conditions=[("X-RAY",DATA["flare"],YELLOW),("Kp",val(DATA["kp"]),YELLOW),
+                ("WIND",val(DATA["speed"],0," km/s"),CYAN),("DENSITY",val(DATA["density"],1," p/cm³"),CYAN),
+                ("Bz",val(DATA["bz"],1," nT"),RED if DATA["bz"] is not None and DATA["bz"]<0 else CYAN),
+                ("SUNSPOTS",val(DATA.get("sunspot"),0),WHITE)]
     for i,(lab,v,col) in enumerate(conditions):
-        x=35+(i%2)*185; y=300+(i//2)*100; d.rounded_rectangle((x,y,x+165,y+76),radius=6,fill=(4,11,23),outline=GRID,width=1); d.text((x+10,y+10),lab,font=F_XS,fill=MUTED); d.text((x+10,y+34),v,font=F_M,fill=col)
-    d.text((450,305),"SOLAR ACTIVITY",font=F_S,fill=MUTED); d.text((450,332),DATA["flare"],font=F_B,fill=YELLOW); scale_xray(d,450,390,340,DATA["flare"]); d.text((450,440),"GEOMAGNETIC",font=F_S,fill=MUTED); d.text((450,468),kp_status(DATA["kp"]),font=F_M,fill=GREEN if (DATA["kp"] or 0)<4 else ORANGE); scale_kp(d,450,520,340,DATA["kp"]); d.text((450,585),"PARTICLE FLUX",font=F_S,fill=MUTED); d.text((450,610),f"Protons {val(DATA['proton'],2)}  Electrons {val(DATA['electron'],2)}",font=F_XS,fill=WHITE)
-    sources=["NOAA SWPC planetary Kp","NOAA RTSW solar wind","NOAA RTSW magnetic field","GOES X-ray / particle feeds","NOAA alerts.json","NOAA sunspot report","NOAA OVATION feed"]
+        cx=x1+65+(i%2)*250; cy=y1+50+(i//2)*68
+        d.rounded_rectangle((cx,cy,cx+225,cy+58),radius=6,fill=(14,14,16),outline=(70,70,70),width=1)
+        d.text((cx+12,cy+8),lab,font=F_XS,fill=STEEL_DK)
+        d.text((cx+12,cy+28),v,font=F_M,fill=col)
+
+    # Panel C — Indicators
+    x1,y1,x2,y2=ROW_C
+    paste_vertical_label(img,x1+6,y1+30,"Indicators",font(20,True),WHITE)
+    d=ImageDraw.Draw(img)
+    d.text((x1+18,y1+16),"GOES X-RAY & PLANETARY Kp SCALES",font=F_XS,fill=GOLD)
+    d.text((x1+65,y1+55),"SOLAR ACTIVITY",font=F_S,fill=STEEL_DK)
+    d.text((x1+65,y1+79),DATA["flare"],font=display_font(30),fill=YELLOW)
+    scale_xray(d,x1+65,y1+150,x2-x1-140,DATA["flare"])
+    d.text((x1+65,y1+195),"GEOMAGNETIC",font=F_S,fill=STEEL_DK)
+    d.text((x1+65,y1+219),kp_status(DATA["kp"]),font=F_M,fill=GREEN if (DATA["kp"] or 0)<4 else ORANGE)
+    scale_kp(d,x1+65,y1+265,x2-x1-140,DATA["kp"])
+
+    # Panel D — Data Sources & Stream Status
+    x1,y1,x2,y2=ROW_D
+    paste_vertical_label(img,x1+6,y1+30,"Data Sources",font(20,True),WHITE)
+    d=ImageDraw.Draw(img)
+    d.text((x1+18,y1+16),"STREAM STATUS • NOAA FEEDS",font=F_XS,fill=GOLD)
+    sources=["NOAA SWPC planetary Kp","NOAA RTSW solar wind","NOAA RTSW magnetic field",
+              "GOES X-ray / particle feeds","NOAA alerts.json","NOAA sunspot report","NOAA OVATION feed"]
     for i,s in enumerate(sources):
         c=GREEN if ((n//10+i)%7)!=0 else CYAN
-        d.ellipse((875,315+i*35,883,323+i*35),fill=c); d.text((892,311+i*35),s,font=F_XS,fill=WHITE)
-    animated_sweep(d,(870,305,1245,555),n,GREEN)
-    d.text((875,570),"STREAM",font=F_XS,fill=MUTED); d.text((875,592),"● LIVE 24/7",font=F_M,fill=GREEN); d.text((875,625),f"Updated {DATA['updated']}",font=F_XS,fill=MUTED); footer(d,n,"NOAA SWPC • LIVE DATA • CONTINUOUS STREAM"); return img
+        yy=y1+50+i*24
+        d.ellipse((x1+65,yy,x1+73,yy+8),fill=c)
+        d.text((x1+82,yy-4),s,font=F_XS,fill=WHITE)
+    d.text((x1+65,y1+228),f"● LIVE 24/7 • Updated {DATA['updated']}",font=F_S,fill=GREEN)
+
+    documentary_ticker(img,d,n)
+    d=ImageDraw.Draw(img)
+    return img
 
 GOLD=(230,175,60); STEEL_LT=(225,228,232); STEEL_DK=(120,124,130); PAPER=(238,236,228)
 
