@@ -1,4 +1,5 @@
 name: Stream Watchdog
+
 on:
   schedule:
     - cron: "*/5 * * * *"
@@ -10,20 +11,41 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Ensure Stream is running
+      - name: Ensure Space Weather Stream is running
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          active=$(gh run list --workflow=stream.yml --status=in_progress --json databaseId --jq 'length' --repo "${{ github.repository }}")
-          queued=$(gh run list --workflow=stream.yml --status=queued --json databaseId --jq 'length' --repo "${{ github.repository }}")
+          set -e
 
-          echo "In-progress Stream runs: $active"
-          echo "Queued Stream runs: $queued"
+          active=$(gh run list \
+            --workflow=space-weather.yml \
+            --status=in_progress \
+            --json databaseId \
+            --jq 'length' \
+            --repo "${{ github.repository }}")
+
+          queued=$(gh run list \
+            --workflow=space-weather.yml \
+            --status=queued \
+            --json databaseId \
+            --jq 'length' \
+            --repo "${{ github.repository }}")
+
+          echo "In-progress runs: $active"
+          echo "Queued runs: $queued"
 
           if [ "$active" -eq 0 ] && [ "$queued" -eq 0 ]; then
-            echo "No Stream run active or queued — starting one now."
-            gh workflow run space-weather.yml --repo "${{ github.repository }}" --ref main -f auto_restart=true
+            echo "No Space Weather stream is running."
+            echo "Starting a new stream..."
+
+            gh workflow run space-weather.yml \
+              --repo "${{ github.repository }}" \
+              --ref main
+
+            echo "New stream workflow dispatched successfully."
           else
-            echo "Stream is already running or queued — nothing to do."
+            echo "Space Weather stream is already running or queued."
+            echo "Nothing to do."
           fi
