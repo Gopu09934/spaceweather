@@ -1,8 +1,10 @@
 name: Restart Stream on Completion
+
 on:
   workflow_run:
     workflows: ["Space Weather Live"]
-    types: [completed]
+    types:
+      - completed
 
 permissions:
   actions: write
@@ -10,9 +12,24 @@ permissions:
 jobs:
   restart:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Trigger next Stream run
+      - name: Check completed workflow
+        run: |
+          echo "Space Weather Live completed."
+          echo "Conclusion: ${{ github.event.workflow_run.conclusion }}"
+
+      - name: Restart Space Weather Stream
+        if: always()
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh workflow run space-weather.yml --repo ${{ github.repository }} --ref main -f auto_restart=true
+          set -e
+
+          echo "Starting a new Space Weather Live run..."
+
+          gh workflow run space-weather.yml \
+            --repo "${{ github.repository }}" \
+            --ref main
+
+          echo "New stream workflow dispatched successfully."
