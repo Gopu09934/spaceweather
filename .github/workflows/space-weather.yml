@@ -1,0 +1,30 @@
+name: Space Weather LIVE
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 */6 * * *"
+
+concurrency:
+  group: space-weather-live
+  cancel-in-progress: true
+
+jobs:
+  stream:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: docker build -t space-weather-live .
+
+      - name: Run Space Weather LIVE
+        env:
+          YOUTUBE_KEY: ${{ secrets.YOUTUBE_KEY }}
+        run: |
+          docker run --rm \
+            -e YOUTUBE_KEY="$YOUTUBE_KEY" \
+            space-weather-live
