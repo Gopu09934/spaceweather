@@ -1,0 +1,35 @@
+name: Space Weather Live
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 */6 * * *'
+
+concurrency:
+  group: space-weather-live
+  cancel-in-progress: true
+
+jobs:
+  stream:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: docker build -t space-weather-live .
+
+      - name: Run stream
+        env:
+          YOUTUBE_KEY: ${{ secrets.YOUTUBE_KEY }}
+          # Add this as a GitHub Actions Repository Variable named MUSIC_URLS.
+          # Multiple URLs are comma-separated.
+          MUSIC_URLS: ${{ vars.MUSIC_URLS || secrets.MUSIC_URLS }}
+          # Optional: Repository Variable to brand the Dashboard 6 ticker/logo.
+          CHANNEL_NAME: ${{ vars.CHANNEL_NAME }}
+        run: |
+          docker run --rm \
+            -e YOUTUBE_KEY="$YOUTUBE_KEY" \
+            -e MUSIC_URLS="$MUSIC_URLS" \
+            -e CHANNEL_NAME="$CHANNEL_NAME" \
+            space-weather-live
