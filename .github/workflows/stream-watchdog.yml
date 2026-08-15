@@ -23,7 +23,7 @@ jobs:
 
           if [ "$active" -eq 0 ] && [ "$queued" -eq 0 ]; then
             echo "No Stream run active or queued — starting one now."
-            gh workflow run stream.yml --repo "${{ github.repository }}" --ref main -f auto_restart=true
+            gh workflow run space-weather.yml --repo "${{ github.repository }}" --ref main -f auto_restart=true
           else
             echo "Stream is already running or queued — nothing to do."
           fi
