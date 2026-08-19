@@ -53,12 +53,36 @@ SOLAR_CYCLE_URL = f"{NOAA}/json/solar-cycle/observed-solar-cycle-indices.json"
 IMAGE_REFRESH = 600  # seconds; real photos/history update far less often than NOAA data
 CHANNEL_NAME = os.getenv("CHANNEL_NAME", "").strip() or "SPACE WEATHER LIVE"
 
+# Optional live-video squares. Set these (env vars or edit directly) to any
+# direct video URL / HLS stream ffmpeg can open. Each one accepts MULTIPLE
+# URLs — separate them with a comma, e.g.:
+#   SUN_VIDEO_URL=https://.../sdo_feed.m3u8,https://.../sun_backup.mp4
+#   EARTH_VIDEO_URL=https://.../earth_feed.mp4,https://.../iss_earth.m3u8
+# Every VIDEO_REFRESH seconds a fresh frame is grabbed from the NEXT url in
+# that list (looping back to the first once the list is exhausted), and
+# shown as a small square badge in the header of every dashboard,
+# alternating between Sun and Earth per dashboard. Leave blank to show a
+# quiet placeholder.
+def _parse_video_urls(env_name):
+    raw = os.getenv(env_name, "").strip()
+    if not raw:
+        return []
+    return [u.strip() for u in raw.split(",") if u.strip()]
+
+SUN_VIDEO_URLS = _parse_video_urls("SUN_VIDEO_URL")
+EARTH_VIDEO_URLS = _parse_video_urls("EARTH_VIDEO_URL")
+VIDEO_REFRESH = int(os.getenv("VIDEO_REFRESH", "60"))
+_video_rotation = {"sun": 0, "earth": 0}  # round-robin index into each URL list
+
 running = True
 lock = threading.Lock()
 img_lock = threading.Lock()
 REAL_IMAGES = {
     "sun": None, "earth": None, "magnetogram": None, "continuum": None,
     "sun_updated": None, "earth_updated": None,
+    "sun_video": None, "earth_video": None,
+    "sun_video_updated": None, "earth_video_updated": None,
+    "_version": 0,  # bumped whenever any cached image changes; drives the resize cache below
 }
 HISTORY = {"months": [], "values": [], "current": None, "this_year_avg": None,
            "prev_year_avg": None, "prev_year_label": None}
@@ -82,6 +106,9 @@ session = requests.Session()
 session.headers["User-Agent"] = "SpaceWeatherLive/2.0"
 
 # Fonts
+from functools import lru_cache
+
+@lru_cache(maxsize=None)
 def font(size, bold=False):
     names = [
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold
@@ -98,6 +125,7 @@ F_TITLE=font(30,True); F_H=font(17,True); F_B=font(31,True)
 F_M=font(20,True); F_S=font(14); F_XS=font(11)
 F_XXS=font(9)
 
+@lru_cache(maxsize=None)
 def display_font(size):
     """Bundled condensed display face for the documentary-style header; falls back cleanly."""
     p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "BebasNeue.ttf")
@@ -112,20 +140,28 @@ BG=(2,7,16); PANEL=(5,13,26); GRID=(20,42,60)
 WHITE=(235,245,255); CYAN=(20,190,255); GREEN=(70,220,60)
 YELLOW=(255,215,30); ORANGE=(255,145,20); RED=(255,55,40)
 PURPLE=(190,90,255); BLUE=(80,145,255); MUTED=(125,155,180)
+GOLD=(230,175,60); STEEL_LT=(225,228,232); STEEL_DK=(120,124,130); PAPER=(238,236,228)
 
 # Star field
 rng=np.random.default_rng(2026)
 STARS=[(int(rng.integers(0,W)),int(rng.integers(0,H)),
         int(rng.integers(1,3))) for _ in range(180)]
 
-def get_json(url):
-    try:
-        r=session.get(url,timeout=20)
-        r.raise_for_status()
-        return r.json()
-    except Exception as e:
-        print("[NOAA ERROR]",url,e,flush=True)
-        return None
+def get_json(url, retries=2, backoff=1.5):
+    """One retry with a short backoff before giving up, so a single transient
+    NOAA hiccup doesn't flatline a graph for the whole refresh cycle."""
+    last_err=None
+    for attempt in range(retries+1):
+        try:
+            r=session.get(url,timeout=20)
+            r.raise_for_status()
+            return r.json()
+        except Exception as e:
+            last_err=e
+            if attempt<retries:
+                time.sleep(backoff*(attempt+1))
+    print("[NOAA ERROR]",url,last_err,flush=True)
+    return None
 
 def records(data):
     if not isinstance(data,list) or not data: return []
@@ -438,14 +474,19 @@ def worker():
 # failure falls back silently to the procedural drawings.
 # ============================================================
 
-def fetch_image_bytes(url):
-    try:
-        r = session.get(url, timeout=20)
-        r.raise_for_status()
-        return Image.open(BytesIO(r.content))
-    except Exception as e:
-        print("[IMAGE ERROR]", url, e, flush=True)
-        return None
+def fetch_image_bytes(url, retries=2, backoff=1.5):
+    last_err=None
+    for attempt in range(retries+1):
+        try:
+            r = session.get(url, timeout=20)
+            r.raise_for_status()
+            return Image.open(BytesIO(r.content))
+        except Exception as e:
+            last_err=e
+            if attempt<retries:
+                time.sleep(backoff*(attempt+1))
+    print("[IMAGE ERROR]", url, last_err, flush=True)
+    return None
 
 def circular_disk(im, size):
     """Center-crop to square, resize, and cut a circular alpha mask."""
@@ -548,13 +589,17 @@ def update_images():
         if sun_img is not None:
             REAL_IMAGES["sun"] = sun_img
             REAL_IMAGES["sun_updated"] = now
+            REAL_IMAGES["_version"] += 1
         if earth_img is not None:
             REAL_IMAGES["earth"] = earth_img
             REAL_IMAGES["earth_updated"] = now
+            REAL_IMAGES["_version"] += 1
         if mag_img is not None:
             REAL_IMAGES["magnetogram"] = mag_img
+            REAL_IMAGES["_version"] += 1
         if cont_img is not None:
             REAL_IMAGES["continuum"] = cont_img
+            REAL_IMAGES["_version"] += 1
         if hist is not None:
             HISTORY.update(hist)
     print(f"[IMAGE] sun={'OK' if sun_img is not None else 'fallback'} "
@@ -568,6 +613,106 @@ def image_worker():
         try:update_images()
         except Exception as e:print("[IMAGE WORKER]",e,flush=True)
         for _ in range(IMAGE_REFRESH):
+            if not running:return
+            time.sleep(1)
+
+# ============================================================
+# RESIZE CACHE
+# Every dashboard frame (30 fps) previously re-resized the same
+# source photo from scratch even though the underlying image only
+# changes every IMAGE_REFRESH/VIDEO_REFRESH seconds. This caches
+# the resized disk per (key, size) and only recomputes it when the
+# source image actually changes (tracked via REAL_IMAGES["_version"]).
+# ============================================================
+_resize_cache = {}
+
+def get_resized(key, size):
+    with img_lock:
+        im = REAL_IMAGES.get(key)
+        ver = REAL_IMAGES.get("_version", 0)
+    if im is None:
+        return None
+    cache_key = (key, size, ver)
+    cached = _resize_cache.get(cache_key)
+    if cached is not None:
+        return cached
+    resized = im.resize((size, size), Image.LANCZOS)
+    _resize_cache[cache_key] = resized
+    # drop stale entries for this key so the cache doesn't grow forever
+    for k in list(_resize_cache):
+        if k[0] == key and k[2] != ver:
+            del _resize_cache[k]
+    return resized
+
+# ============================================================
+# LIVE VIDEO SQUARES (Sun / Earth)
+# Grabs a single current frame from SUN_VIDEO_URL / EARTH_VIDEO_URL via
+# ffmpeg (works with mp4, HLS, most direct video URLs), crops it to a
+# square, and caches it exactly like the other real imagery so it can be
+# dropped into every dashboard without re-decoding video every frame.
+#
+# Each slot accepts a LIST of URLs (comma-separated in the env var). Every
+# refresh cycle we advance to the next URL round-robin and loop back to the
+# first once we reach the end — so if one feed is down or you supply several
+# camera sources, the badge keeps cycling through all of them forever.
+# ============================================================
+
+def fetch_video_frame_square(url, size=460):
+    if not url:
+        return None
+    try:
+        proc = subprocess.run(
+            ["ffmpeg", "-y", "-loglevel", "error", "-i", url,
+             "-frames:v", "1", "-f", "image2pipe", "-vcodec", "png", "-"],
+            capture_output=True, timeout=25,
+        )
+        if proc.returncode != 0 or not proc.stdout:
+            print("[VIDEO FRAME ERROR]", url, (proc.stderr or b"")[:200], flush=True)
+            return None
+        im = Image.open(BytesIO(proc.stdout)).convert("RGB")
+    except Exception as e:
+        print("[VIDEO FRAME ERROR]", url, e, flush=True)
+        return None
+    w, h = im.size
+    s = min(w, h)
+    left, top = (w - s) // 2, (h - s) // 2
+    return im.crop((left, top, left + s, top + s)).resize((size, size), Image.LANCZOS)
+
+def _next_video_url(key, urls):
+    """Round-robin picker: returns the next URL in the list and loops back
+    to the start once exhausted, so a multi-URL feed cycles forever."""
+    if not urls:
+        return None
+    idx = _video_rotation[key] % len(urls)
+    _video_rotation[key] = (idx + 1) % len(urls)
+    return urls[idx]
+
+def update_video_frames():
+    now = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
+    sun_url = _next_video_url("sun", SUN_VIDEO_URLS)
+    earth_url = _next_video_url("earth", EARTH_VIDEO_URLS)
+    sun_img = fetch_video_frame_square(sun_url) if sun_url else None
+    earth_img = fetch_video_frame_square(earth_url) if earth_url else None
+    with img_lock:
+        if sun_img is not None:
+            REAL_IMAGES["sun_video"] = sun_img
+            REAL_IMAGES["sun_video_updated"] = now
+            REAL_IMAGES["_version"] += 1
+        if earth_img is not None:
+            REAL_IMAGES["earth_video"] = earth_img
+            REAL_IMAGES["earth_video_updated"] = now
+            REAL_IMAGES["_version"] += 1
+    print(f"[VIDEO] sun={'OK '+sun_url if sun_img is not None else 'skip'} "
+          f"earth={'OK '+earth_url if earth_img is not None else 'skip'}", flush=True)
+
+def video_worker():
+    if not (SUN_VIDEO_URLS or EARTH_VIDEO_URLS):
+        print("[VIDEO] SUN_VIDEO_URL/EARTH_VIDEO_URL not set — video squares will show a quiet placeholder", flush=True)
+        return
+    while running:
+        try:update_video_frames()
+        except Exception as e:print("[VIDEO WORKER]",e,flush=True)
+        for _ in range(VIDEO_REFRESH):
             if not running:return
             time.sleep(1)
 
@@ -613,8 +758,7 @@ def draw_sun(img,d,cx,cy,r,n):
         a=max(1,int(20*(r+25-rr)/27))
         d.ellipse((cx-rr,cy-rr,cx+rr,cy+rr),outline=(120+a*3,50+a*2,10),width=1)
     if sun_real is not None:
-        diam=r*2
-        disk=sun_real.resize((diam,diam),Image.LANCZOS)
+        disk=get_resized("sun",r*2)
         img.paste(disk,(cx-r,cy-r),disk)
         d.ellipse((cx-r,cy-r,cx+r,cy+r),outline=(255,190,30),width=2)
     else:
@@ -644,8 +788,7 @@ def aurora(img,d,box,n):
     with img_lock:
         earth_real = REAL_IMAGES["earth"]
     if earth_real is not None:
-        diam=er*2
-        disk=earth_real.resize((diam,diam),Image.LANCZOS)
+        disk=get_resized("earth",er*2)
         img.paste(disk,(cx-er,cy-er),disk)
         d.ellipse((cx-er,cy-er,cx+er,cy+er),outline=(30,110,170),width=1)
     else:
@@ -732,6 +875,15 @@ def scale_xray(d,x,y,w,flare):
 def pulse_value(n, speed=0.08):
     return 0.5 + 0.5 * math.sin(n * speed)
 
+def stat_card(d, cx, cy, w, h, label, value, color=WHITE,
+              label_font=None, value_font=None, label_pad=10, value_pad=32):
+    """Shared rounded stat-card widget (label on top, big value below) used
+    across the dashboards' 2-up/2-down grids so the look/spacing stays
+    identical everywhere instead of being re-coded per dashboard."""
+    d.rounded_rectangle((cx, cy, cx+w, cy+h), radius=6, fill=(14,14,16), outline=(70,70,70), width=1)
+    d.text((cx+14, cy+label_pad), label, font=label_font or F_S, fill=STEEL_DK)
+    d.text((cx+14, cy+value_pad), value, font=value_font or F_M, fill=color)
+
 def live_dot(d, x, y, n, color=GREEN):
     p = pulse_value(n, 0.12)
     r = 3 + int(3*p)
@@ -775,8 +927,33 @@ def animated_wave(d, x1, y1, x2, y2, n, color=CYAN):
 ROW_A=(12,82,660,358); ROW_B=(672,82,1268,358)
 ROW_C=(12,368,660,650); ROW_D=(672,368,1268,650)
 
-def documentary_header(img,n,title1,title2,glow=(255,190,80)):
-    """Brushed-steel title bar shared by all dashboards for a consistent look."""
+def video_badge(img,d,key,label,accent=GOLD):
+    """Small square live-video feed in the header, identical position/size on
+    every dashboard. Shows the latest cached frame from SUN_VIDEO_URL or
+    EARTH_VIDEO_URL (whichever `key` selects); degrades to a quiet
+    'NO FEED' placeholder if no video URL was configured or the last grab
+    failed, so the layout never breaks."""
+    size=54
+    x2=W-16; x1=x2-size
+    y1=9; y2=y1+size
+    disk=get_resized(key,size-4)
+    d.rounded_rectangle((x1,y1,x2,y2),radius=6,fill=(8,8,10),outline=accent,width=2)
+    if disk is not None:
+        img.paste(disk,(x1+2,y1+2))
+        d=ImageDraw.Draw(img)
+        d.rounded_rectangle((x1,y1,x2,y2),radius=6,outline=accent,width=2)
+    else:
+        d.text((x1+9,y1+16),"NO",font=F_XXS,fill=STEEL_DK)
+        d.text((x1+9,y1+28),"FEED",font=F_XXS,fill=STEEL_DK)
+    d.rectangle((x1+2,y2-14,x2-2,y2-2),fill=(0,0,0))
+    d.text((x1+6,y2-13),label,font=F_XXS,fill=(255,255,255))
+    live_dot(d,x2-9,y1+9,0,GREEN if disk is not None else STEEL_DK)
+    return d
+
+def documentary_header(img,n,title1,title2,glow=(255,190,80),video_key="earth_video",video_label="EARTH"):
+    """Brushed-steel title bar shared by all dashboards for a consistent look.
+    Also draws the small live Sun/Earth video square in the same spot on
+    every dashboard so the feed is always present, just alternating source."""
     grad=metallic_header_bg(W,72,n); img.paste(grad,(0,0))
     d=ImageDraw.Draw(img)
     w1=d.textlength(title1,font=F_DISPLAY_XL)
@@ -786,11 +963,13 @@ def documentary_header(img,n,title1,title2,glow=(255,190,80)):
         d.text((sx-off,18-off//3),title1,font=F_DISPLAY_XL,fill=glow)
     d.text((sx,18),title1,font=F_DISPLAY_XL,fill=(20,16,10))
     d.text((sx+w1+14,18),title2,font=F_DISPLAY_XL,fill=(20,16,10))
+    d=video_badge(img,d,video_key,video_label,accent=glow)
     return d
 
 def dashboard1(n):
     img=Image.new("RGB",(W,H),(6,6,8))
-    d=documentary_header(img,n,"SPACE WEATHER","LIVE OVERVIEW",glow=(90,200,255))
+    with lock: D=dict(DATA)
+    d=documentary_header(img,n,"SPACE WEATHER","LIVE OVERVIEW",glow=(90,200,255),video_key="earth_video",video_label="EARTH")
     for box in (ROW_A,ROW_B,ROW_C,ROW_D):
         corner_bracket_panel(d,box,accent=CYAN)
 
@@ -798,10 +977,10 @@ def dashboard1(n):
     x1,y1,x2,y2=ROW_A
     d.text((x1+18,y1+16),"THE SUN — LIVE DISK",font=font(22,True),fill=WHITE)
     d.text((x1+18,y1+70),"CURRENT FLARE CLASS",font=F_S,fill=STEEL_DK)
-    d.text((x1+18,y1+96),DATA["flare"],font=display_font(46),fill=YELLOW)
+    d.text((x1+18,y1+96),D["flare"],font=display_font(46),fill=YELLOW)
     d.text((x1+18,y1+165),"SUNSPOT NUMBER",font=F_S,fill=STEEL_DK)
-    d.text((x1+18,y1+191),val(DATA.get("sunspot"),0),font=display_font(38),fill=WHITE)
-    kp0=DATA["kp"]
+    d.text((x1+18,y1+191),val(D.get("sunspot"),0),font=display_font(38),fill=WHITE)
+    kp0=D["kp"]
     d.text((x1+18,y1+245),f"Planetary Kp {val(kp0)} — {kp_status(kp0)}",font=F_S,
            fill=GREEN if (kp0 or 0)<4 else ORANGE)
     tcx,tcy,tr=x2-165,y1+(y2-y1)//2,100
@@ -813,15 +992,13 @@ def dashboard1(n):
     paste_vertical_label(img,x1+6,y1+30,"Solar Wind & IMF",font(20,True),WHITE)
     d=ImageDraw.Draw(img)
     d.text((x1+18,y1+16),"NOAA RTSW • LIVE PLASMA & FIELD DATA",font=F_XS,fill=GOLD)
-    cards=[("SPEED",val(DATA["speed"],0," km/s"),CYAN),
-           ("DENSITY",val(DATA["density"],1," p/cm³"),CYAN),
-           ("Bz GSM",val(DATA["bz"],1," nT"),RED if DATA["bz"] is not None and DATA["bz"]<0 else CYAN),
-           ("Bt",val(DATA["bt"],1," nT"),BLUE)]
+    cards=[("SPEED",val(D["speed"],0," km/s"),CYAN),
+           ("DENSITY",val(D["density"],1," p/cm³"),CYAN),
+           ("Bz GSM",val(D["bz"],1," nT"),RED if D["bz"] is not None and D["bz"]<0 else CYAN),
+           ("Bt",val(D["bt"],1," nT"),BLUE)]
     for i,(lab,v,col) in enumerate(cards):
         cx=x1+65+(i%2)*250; cy=y1+55+(i//2)*95
-        d.rounded_rectangle((cx,cy,cx+225,cy+75),radius=6,fill=(14,14,16),outline=(70,70,70),width=1)
-        d.text((cx+14,cy+10),lab,font=F_S,fill=STEEL_DK)
-        d.text((cx+14,cy+32),v,font=display_font(26),fill=col)
+        stat_card(d,cx,cy,225,75,lab,v,col,value_font=display_font(26))
     d.text((x1+65,y1+250),f"PLANETARY Kp {val(kp0)} — {kp_status(kp0)}",font=F_M,fill=YELLOW)
 
     # Panel C — Live History
@@ -829,7 +1006,7 @@ def dashboard1(n):
     paste_vertical_label(img,x1+6,y1+30,"Live History",font(20,True),WHITE)
     d=ImageDraw.Draw(img)
     d.text((x1+18,y1+16),"NOAA SWPC • ROLLING FEED HISTORY",font=F_XS,fill=GOLD)
-    hist=DATA["history"]; gx1,gx2=x1+60,x2-25
+    hist=D["history"]; gx1,gx2=x1+60,x2-25
     d.text((gx1,y1+38),"SOLAR WIND SPEED (km/s)",font=F_XS,fill=CYAN)
     graph(d,(gx1,y1+55,gx2,y1+150),[h[1] for h in hist],CYAN); animated_scan(d,gx1,y1+55,gx2,y1+150,n,CYAN,1)
     d.text((gx1,y1+163),"GOES X-RAY FLUX",font=F_XS,fill=YELLOW)
@@ -850,7 +1027,8 @@ def dashboard1(n):
 
 def dashboard2(n):
     img=Image.new("RGB",(W,H),(6,6,8))
-    d=documentary_header(img,n,"SOLAR ACTIVITY","MONITOR",glow=(255,170,60))
+    with lock: D=dict(DATA)
+    d=documentary_header(img,n,"SOLAR ACTIVITY","MONITOR",glow=(255,170,60),video_key="sun_video",video_label="SUN")
     for box in (ROW_A,ROW_B,ROW_C,ROW_D):
         corner_bracket_panel(d,box,accent=ORANGE)
 
@@ -858,10 +1036,10 @@ def dashboard2(n):
     x1,y1,x2,y2=ROW_A
     d.text((x1+18,y1+16),"SUNSPOT ACTIVITY",font=font(22,True),fill=WHITE)
     d.text((x1+18,y1+70),"CURRENT SUNSPOT NUMBER",font=F_S,fill=STEEL_DK)
-    d.text((x1+18,y1+96),val(DATA.get("sunspot"),0),font=display_font(46),fill=WHITE)
+    d.text((x1+18,y1+96),val(D.get("sunspot"),0),font=display_font(46),fill=WHITE)
     d.text((x1+18,y1+165),"CURRENT FLARE CLASS",font=F_S,fill=STEEL_DK)
-    d.text((x1+18,y1+191),DATA["flare"],font=display_font(38),fill=YELLOW)
-    xr=DATA["xray"]
+    d.text((x1+18,y1+191),D["flare"],font=display_font(38),fill=YELLOW)
+    xr=D["xray"]
     d.text((x1+18,y1+245),f"X-ray flux {xr:.2e} W/m²" if xr else "X-ray flux --",font=F_S,fill=MUTED)
     tcx,tcy,tr=x2-165,y1+(y2-y1)//2,100
     draw_sun(img,d,tcx,tcy,tr,n)
@@ -872,15 +1050,13 @@ def dashboard2(n):
     paste_vertical_label(img,x1+6,y1+30,"Solar Disk Imagery",font(20,True),WHITE)
     d=ImageDraw.Draw(img)
     d.text((x1+18,y1+16),"NASA SDO • LIVE FULL-DISK IMAGERY",font=F_XS,fill=GOLD)
-    with img_lock:
-        mag=REAL_IMAGES.get("magnetogram"); cont=REAL_IMAGES.get("continuum")
     r2=95
     c1x,c1y=x1+165,y1+(y2-y1)//2+15
     c2x,c2y=x2-150,y1+(y2-y1)//2+15
-    for (cxp,cyp,im,lab) in [(c1x,c1y,mag,"MAGNETOGRAM"),(c2x,c2y,cont,"CONTINUUM (VISIBLE LIGHT)")]:
+    for (cxp,cyp,key,lab) in [(c1x,c1y,"magnetogram","MAGNETOGRAM"),(c2x,c2y,"continuum","CONTINUUM (VISIBLE LIGHT)")]:
         d.ellipse((cxp-r2,cyp-r2,cxp+r2,cyp+r2),fill=(15,15,15),outline=(70,70,70),width=1)
-        if im is not None:
-            disk=im.resize((r2*2,r2*2),Image.LANCZOS)
+        disk=get_resized(key,r2*2)
+        if disk is not None:
             img.paste(disk,(cxp-r2,cyp-r2),disk)
             d=ImageDraw.Draw(img)
         d.text((cxp-r2,cyp+r2+8),lab,font=F_XXS,fill=STEEL_DK)
@@ -890,9 +1066,9 @@ def dashboard2(n):
     paste_vertical_label(img,x1+6,y1+30,"X-Ray History",font(20,True),WHITE)
     d=ImageDraw.Draw(img)
     d.text((x1+18,y1+16),"GOES X-RAY • 1-DAY FEED • LIVE",font=F_XS,fill=GOLD)
-    hist=DATA["history"]; gx1,gx2=x1+60,x2-25
+    hist=D["history"]; gx1,gx2=x1+60,x2-25
     graph(d,(gx1,y1+45,gx2,y1+215),[h[4] for h in hist],YELLOW); animated_scan(d,gx1,y1+45,gx2,y1+215,n,YELLOW,1)
-    scale_xray(d,gx1,y1+250,gx2-gx1,DATA["flare"])
+    scale_xray(d,gx1,y1+250,gx2-gx1,D["flare"])
 
     # Panel D — Flare & Geomagnetic Summary
     x1,y1,x2,y2=ROW_D
@@ -900,11 +1076,11 @@ def dashboard2(n):
     d=ImageDraw.Draw(img)
     d.text((x1+18,y1+16),"SUMMARY • NOAA SWPC",font=F_XS,fill=GOLD)
     d.text((x1+65,y1+50),"CURRENT FLARE CLASS",font=F_S,fill=STEEL_DK)
-    d.text((x1+65,y1+74),DATA["flare"],font=display_font(42),fill=YELLOW)
-    scale_xray(d,x1+65,y1+150,x2-x1-140,DATA["flare"])
+    d.text((x1+65,y1+74),D["flare"],font=display_font(42),fill=YELLOW)
+    scale_xray(d,x1+65,y1+150,x2-x1-140,D["flare"])
     d.text((x1+65,y1+195),"GEOMAGNETIC STATUS",font=F_S,fill=STEEL_DK)
-    d.text((x1+65,y1+219),kp_status(DATA["kp"]),font=F_M,fill=GREEN if (DATA["kp"] or 0)<4 else ORANGE)
-    d.text((x1+65,y1+250),f"Sunspots {val(DATA.get('sunspot'),0)}  •  Kp {val(DATA['kp'])}",font=F_S,fill=WHITE)
+    d.text((x1+65,y1+219),kp_status(D["kp"]),font=F_M,fill=GREEN if (D["kp"] or 0)<4 else ORANGE)
+    d.text((x1+65,y1+250),f"Sunspots {val(D.get('sunspot'),0)}  •  Kp {val(D['kp'])}",font=F_S,fill=WHITE)
 
     documentary_ticker(img,d,n)
     d=ImageDraw.Draw(img)
@@ -912,7 +1088,8 @@ def dashboard2(n):
 
 def dashboard3(n):
     img=Image.new("RGB",(W,H),(6,6,8))
-    d=documentary_header(img,n,"SOLAR WIND","MONITOR",glow=(80,170,255))
+    with lock: D=dict(DATA)
+    d=documentary_header(img,n,"SOLAR WIND","MONITOR",glow=(80,170,255),video_key="earth_video",video_label="EARTH")
     for box in (ROW_A,ROW_B,ROW_C,ROW_D):
         corner_bracket_panel(d,box,accent=BLUE)
 
@@ -920,18 +1097,16 @@ def dashboard3(n):
     x1,y1,x2,y2=ROW_A
     d.text((x1+18,y1+16),"SOLAR WIND SPEED",font=font(22,True),fill=WHITE)
     d.text((x1+18,y1+70),"CURRENT VELOCITY",font=F_S,fill=STEEL_DK)
-    d.text((x1+18,y1+96),val(DATA["speed"],0," km/s"),font=display_font(46),fill=CYAN)
-    speed=DATA["speed"] or 0; bar=min(100,max(0,speed/800*100))
+    d.text((x1+18,y1+96),val(D["speed"],0," km/s"),font=display_font(46),fill=CYAN)
+    speed=D["speed"] or 0; bar=min(100,max(0,speed/800*100))
     d.rounded_rectangle((x1+18,y1+175,x2-25,y1+202),radius=8,fill=(14,14,16),outline=(70,70,70),width=1)
     d.rounded_rectangle((x1+22,y1+179,x1+22+(x2-x1-70)*bar/100,y1+198),radius=6,fill=CYAN)
     animated_particles(d,x1+22,y1+179,x2-30,y1+198,n,14,CYAN)
     d.text((x1+18,y1+215),"Real-time NOAA RTSW solar-wind speed",font=F_XS,fill=MUTED)
-    with img_lock:
-        earth_thumb=REAL_IMAGES.get("earth")
     tcx,tcy,tr=x2-110,y1+245,55
     d.ellipse((tcx-tr,tcy-tr,tcx+tr,tcy+tr),fill=(7,20,42),outline=(30,110,170),width=1)
-    if earth_thumb is not None:
-        disk=earth_thumb.resize((tr*2,tr*2),Image.LANCZOS)
+    disk=get_resized("earth",tr*2)
+    if disk is not None:
         img.paste(disk,(tcx-tr,tcy-tr),disk)
         d=ImageDraw.Draw(img)
     d.text((tcx-tr,tcy+tr+6),"ARRIVAL AT EARTH",font=F_XXS,fill=STEEL_DK)
@@ -942,11 +1117,11 @@ def dashboard3(n):
     d=ImageDraw.Draw(img)
     d.text((x1+18,y1+16),"NOAA RTSW MAG • LIVE",font=F_XS,fill=GOLD)
     d.text((x1+65,y1+55),"Bz GSM",font=F_S,fill=STEEL_DK)
-    d.text((x1+65,y1+79),val(DATA["bz"],1," nT"),font=display_font(34),
-           fill=RED if DATA["bz"] is not None and DATA["bz"]<0 else CYAN)
+    d.text((x1+65,y1+79),val(D["bz"],1," nT"),font=display_font(34),
+           fill=RED if D["bz"] is not None and D["bz"]<0 else CYAN)
     d.text((x1+310,y1+55),"Bt",font=F_S,fill=STEEL_DK)
-    d.text((x1+310,y1+79),val(DATA["bt"],1," nT"),font=display_font(34),fill=BLUE)
-    south="SOUTHWARD" if DATA["bz"] is not None and DATA["bz"]<0 else "NORTHWARD / WEAK"
+    d.text((x1+310,y1+79),val(D["bt"],1," nT"),font=display_font(34),fill=BLUE)
+    south="SOUTHWARD" if D["bz"] is not None and D["bz"]<0 else "NORTHWARD / WEAK"
     d.text((x1+65,y1+150),south,font=F_M,fill=RED if south=="SOUTHWARD" else GREEN)
     shock="ELEVATED" if speed>600 else "NORMAL"
     d.text((x1+65,y1+195),"STREAM STATUS",font=F_S,fill=STEEL_DK)
@@ -958,7 +1133,7 @@ def dashboard3(n):
     paste_vertical_label(img,x1+6,y1+30,"Speed History",font(20,True),WHITE)
     d=ImageDraw.Draw(img)
     d.text((x1+18,y1+16),"SOLAR WIND SPEED • ROLLING FEED",font=F_XS,fill=GOLD)
-    hist=DATA["history"]; gx1,gx2=x1+60,x2-25
+    hist=D["history"]; gx1,gx2=x1+60,x2-25
     graph(d,(gx1,y1+45,gx2,y2-25),[h[1] for h in hist],CYAN)
     animated_scan(d,gx1,y1+45,gx2,y2-25,n,CYAN,1); animated_particles(d,gx1,y1+45,gx2,y2-25,n,8,CYAN)
 
@@ -970,7 +1145,7 @@ def dashboard3(n):
     gx1,gx2=x1+60,x2-25
     graph(d,(gx1,y1+45,gx2,y1+195),[h[2] for h in hist],BLUE,zero=True)
     animated_scan(d,gx1,y1+45,gx2,y1+195,n,BLUE,1); animated_particles(d,gx1,y1+45,gx2,y1+195,n,8,BLUE)
-    d.text((x1+65,y1+215),f"Planetary Kp {val(DATA['kp'])} — {kp_status(DATA['kp'])}",font=F_M,fill=YELLOW)
+    d.text((x1+65,y1+215),f"Planetary Kp {val(D['kp'])} — {kp_status(D['kp'])}",font=F_M,fill=YELLOW)
 
     documentary_ticker(img,d,n)
     d=ImageDraw.Draw(img)
@@ -978,7 +1153,8 @@ def dashboard3(n):
 
 def dashboard4(n):
     img=Image.new("RGB",(W,H),(6,6,8))
-    d=documentary_header(img,n,"AURORA &","GEOMAGNETIC",glow=(90,230,120))
+    with lock: D=dict(DATA)
+    d=documentary_header(img,n,"AURORA &","GEOMAGNETIC",glow=(90,230,120),video_key="sun_video",video_label="SUN")
     for box in (ROW_A,ROW_B,ROW_C,ROW_D):
         corner_bracket_panel(d,box,accent=GREEN)
 
@@ -994,24 +1170,24 @@ def dashboard4(n):
     paste_vertical_label(img,x1+6,y1+30,"Current Conditions",font(20,True),WHITE)
     d=ImageDraw.Draw(img)
     d.text((x1+18,y1+16),"NOAA SWPC • LIVE FEED",font=F_XS,fill=GOLD)
-    kp=DATA["kp"]
+    kp=D["kp"]
     d.text((x1+65,y1+50),"PLANETARY Kp",font=F_S,fill=STEEL_DK)
     d.text((x1+65,y1+74),val(kp),font=display_font(40),fill=YELLOW)
     d.text((x1+65,y1+140),kp_status(kp),font=F_M,fill=GREEN if (kp or 0)<4 else ORANGE)
     d.text((x1+320,y1+50),"Bz",font=F_S,fill=STEEL_DK)
-    d.text((x1+320,y1+74),val(DATA["bz"],1," nT"),font=display_font(30),
-           fill=RED if DATA["bz"] is not None and DATA["bz"]<0 else CYAN)
+    d.text((x1+320,y1+74),val(D["bz"],1," nT"),font=display_font(30),
+           fill=RED if D["bz"] is not None and D["bz"]<0 else CYAN)
     d.text((x1+320,y1+140),"WIND",font=F_S,fill=STEEL_DK)
-    d.text((x1+320,y1+164),val(DATA["speed"],0," km/s"),font=F_M,fill=CYAN)
+    d.text((x1+320,y1+164),val(D["speed"],0," km/s"),font=F_M,fill=CYAN)
 
     # Panel C — Kp Trend & Scale
     x1,y1,x2,y2=ROW_C
     paste_vertical_label(img,x1+6,y1+30,"Kp Trend & Scale",font(20,True),WHITE)
     d=ImageDraw.Draw(img)
     d.text((x1+18,y1+16),"RECENT NOAA Kp VALUES • LIVE",font=F_XS,fill=GOLD)
-    hist=DATA["history"]; gx1,gx2=x1+60,x2-25
+    hist=D["history"]; gx1,gx2=x1+60,x2-25
     graph(d,(gx1,y1+45,gx2,y1+165),[h[3] for h in hist],GREEN); animated_scan(d,gx1,y1+45,gx2,y1+165,n,GREEN,1)
-    scale_kp(d,gx1,y1+225,gx2-gx1,DATA["kp"])
+    scale_kp(d,gx1,y1+225,gx2-gx1,D["kp"])
 
     # Panel D — Aurora Feed Status
     x1,y1,x2,y2=ROW_D
@@ -1019,8 +1195,8 @@ def dashboard4(n):
     d=ImageDraw.Draw(img)
     d.text((x1+18,y1+16),"OVATION / DATA STREAM STATUS",font=F_XS,fill=GOLD)
     d.text((x1+65,y1+55),"OVATION JSON FEED",font=F_S,fill=STEEL_DK)
-    d.text((x1+65,y1+79),"AVAILABLE" if DATA.get("ovation_ok") else "UNAVAILABLE",font=F_M,
-           fill=GREEN if DATA.get("ovation_ok") else ORANGE)
+    d.text((x1+65,y1+79),"AVAILABLE" if D.get("ovation_ok") else "UNAVAILABLE",font=F_M,
+           fill=GREEN if D.get("ovation_ok") else ORANGE)
     d.text((x1+65,y1+140),"No invented probability is shown.",font=F_S,fill=WHITE)
     d.text((x1+65,y1+164),"Use official OVATION products for probability maps.",font=F_XXS,fill=STEEL_DK)
     live_dot(d,x1+70,y1+220,n,GREEN); d.text((x1+82,y1+212),"LIVE 24/7 GEOMAGNETIC MONITORING",font=F_XS,fill=GREEN)
@@ -1031,7 +1207,8 @@ def dashboard4(n):
 
 def dashboard5(n):
     img=Image.new("RGB",(W,H),(6,6,8))
-    d=documentary_header(img,n,"SPACE WEATHER","ALERT CENTER",glow=(255,90,80))
+    with lock: D=dict(DATA)
+    d=documentary_header(img,n,"SPACE WEATHER","ALERT CENTER",glow=(255,90,80),video_key="earth_video",video_label="EARTH")
     for box in (ROW_A,ROW_B,ROW_C,ROW_D):
         corner_bracket_panel(d,box,accent=RED)
 
@@ -1039,12 +1216,10 @@ def dashboard5(n):
     x1,y1,x2,y2=ROW_A
     d.text((x1+18,y1+16),"CURRENT NOAA ALERT / WARNING",font=font(22,True),fill=WHITE)
     alert_box(d,(x1+18,y1+55,x2-18,y2-18))
-    live_dot(d,x2-35,y1+70,n,RED if DATA["alert"]!="NO CURRENT ALERTS" else GREEN)
-    with img_lock:
-        sun_thumb=REAL_IMAGES.get("sun")
+    live_dot(d,x2-35,y1+70,n,RED if D["alert"]!="NO CURRENT ALERTS" else GREEN)
     tcx,tcy,tr=x2-58,y1+37,22
-    if sun_thumb is not None:
-        disk=sun_thumb.resize((tr*2,tr*2),Image.LANCZOS)
+    disk=get_resized("sun",tr*2)
+    if disk is not None:
         img.paste(disk,(tcx-tr,tcy-tr),disk)
         d=ImageDraw.Draw(img)
 
@@ -1053,15 +1228,13 @@ def dashboard5(n):
     paste_vertical_label(img,x1+6,y1+30,"Live Conditions",font(20,True),WHITE)
     d=ImageDraw.Draw(img)
     d.text((x1+18,y1+16),"NOAA SWPC • LIVE FEED",font=F_XS,fill=GOLD)
-    conditions=[("X-RAY",DATA["flare"],YELLOW),("Kp",val(DATA["kp"]),YELLOW),
-                ("WIND",val(DATA["speed"],0," km/s"),CYAN),("DENSITY",val(DATA["density"],1," p/cm³"),CYAN),
-                ("Bz",val(DATA["bz"],1," nT"),RED if DATA["bz"] is not None and DATA["bz"]<0 else CYAN),
-                ("SUNSPOTS",val(DATA.get("sunspot"),0),WHITE)]
+    conditions=[("X-RAY",D["flare"],YELLOW),("Kp",val(D["kp"]),YELLOW),
+                ("WIND",val(D["speed"],0," km/s"),CYAN),("DENSITY",val(D["density"],1," p/cm³"),CYAN),
+                ("Bz",val(D["bz"],1," nT"),RED if D["bz"] is not None and D["bz"]<0 else CYAN),
+                ("SUNSPOTS",val(D.get("sunspot"),0),WHITE)]
     for i,(lab,v,col) in enumerate(conditions):
         cx=x1+65+(i%2)*250; cy=y1+50+(i//2)*68
-        d.rounded_rectangle((cx,cy,cx+225,cy+58),radius=6,fill=(14,14,16),outline=(70,70,70),width=1)
-        d.text((cx+12,cy+8),lab,font=F_XS,fill=STEEL_DK)
-        d.text((cx+12,cy+28),v,font=F_M,fill=col)
+        stat_card(d,cx,cy,225,58,lab,v,col,label_font=F_XS,label_pad=8,value_pad=28)
 
     # Panel C — Indicators
     x1,y1,x2,y2=ROW_C
@@ -1069,11 +1242,11 @@ def dashboard5(n):
     d=ImageDraw.Draw(img)
     d.text((x1+18,y1+16),"GOES X-RAY & PLANETARY Kp SCALES",font=F_XS,fill=GOLD)
     d.text((x1+65,y1+55),"SOLAR ACTIVITY",font=F_S,fill=STEEL_DK)
-    d.text((x1+65,y1+79),DATA["flare"],font=display_font(30),fill=YELLOW)
-    scale_xray(d,x1+65,y1+150,x2-x1-140,DATA["flare"])
+    d.text((x1+65,y1+79),D["flare"],font=display_font(30),fill=YELLOW)
+    scale_xray(d,x1+65,y1+150,x2-x1-140,D["flare"])
     d.text((x1+65,y1+195),"GEOMAGNETIC",font=F_S,fill=STEEL_DK)
-    d.text((x1+65,y1+219),kp_status(DATA["kp"]),font=F_M,fill=GREEN if (DATA["kp"] or 0)<4 else ORANGE)
-    scale_kp(d,x1+65,y1+265,x2-x1-140,DATA["kp"])
+    d.text((x1+65,y1+219),kp_status(D["kp"]),font=F_M,fill=GREEN if (D["kp"] or 0)<4 else ORANGE)
+    scale_kp(d,x1+65,y1+265,x2-x1-140,D["kp"])
 
     # Panel D — Data Sources & Stream Status
     x1,y1,x2,y2=ROW_D
@@ -1087,13 +1260,11 @@ def dashboard5(n):
         yy=y1+50+i*24
         d.ellipse((x1+65,yy,x1+73,yy+8),fill=c)
         d.text((x1+82,yy-4),s,font=F_XS,fill=WHITE)
-    d.text((x1+65,y1+228),f"● LIVE 24/7 • Updated {DATA['updated']}",font=F_S,fill=GREEN)
+    d.text((x1+65,y1+228),f"● LIVE 24/7 • Updated {D['updated']}",font=F_S,fill=GREEN)
 
     documentary_ticker(img,d,n)
     d=ImageDraw.Draw(img)
     return img
-
-GOLD=(230,175,60); STEEL_LT=(225,228,232); STEEL_DK=(120,124,130); PAPER=(238,236,228)
 
 def metallic_header_bg(w,h,n):
     """Brushed-steel horizontal gradient for the documentary-style title bar."""
@@ -1200,17 +1371,9 @@ def documentary_ticker(img,d,n):
     d.text((1225,668),"U",font=F_XS,fill=MUTED); d.text((1225,682),"T",font=F_XS,fill=MUTED); d.text((1225,696),"C",font=F_XS,fill=MUTED)
 
 def dashboard6(n):
-    img=Image.new("RGB",(W,H),(6,6,8)); d=ImageDraw.Draw(img)
-    grad=metallic_header_bg(W,72,n); img.paste(grad,(0,0))
-    d=ImageDraw.Draw(img)
-    title1="SPACE"; title2="WEATHER MONITOR"
-    w1=d.textlength(title1,font=F_DISPLAY_XL)
-    total_w=w1+d.textlength(" "+title2,font=F_DISPLAY_XL)
-    sx=(W-total_w)//2
-    for off in range(6,0,-2):
-        d.text((sx-off,18-off//3),title1,font=F_DISPLAY_XL,fill=(255,190,80))
-    d.text((sx,18),title1,font=F_DISPLAY_XL,fill=(20,16,10))
-    d.text((sx+w1+14,18),title2,font=F_DISPLAY_XL,fill=(20,16,10))
+    img=Image.new("RGB",(W,H),(6,6,8))
+    with lock: D=dict(DATA)
+    d=documentary_header(img,n,"SPACE","WEATHER MONITOR",glow=(255,190,80),video_key="sun_video",video_label="SUN")
 
     rowA=(12,82,660,358); rowB=(672,82,1268,358)
     rowC=(12,368,660,650); rowD=(672,368,1268,650)
@@ -1220,7 +1383,7 @@ def dashboard6(n):
     # Panel A — Sunspot Activity
     x1,y1,x2,y2=rowA
     d.text((x1+18,y1+16),"SUNSPOT ACTIVITY",font=font(22,True),fill=WHITE)
-    cur=DATA.get("sunspot"); prev=HISTORY.get("this_year_avg")
+    cur=D.get("sunspot"); prev=HISTORY.get("this_year_avg")
     d.text((x1+18,y1+70),"CURRENT AMOUNT",font=F_S,fill=STEEL_DK)
     d.text((x1+18,y1+96),val(cur,0),font=display_font(46),fill=WHITE)
     if cur is not None and prev is not None:
@@ -1234,12 +1397,10 @@ def dashboard6(n):
         d.text((x1+18,y1+245),f"{pct:+.1f}% vs {HISTORY.get('prev_year_label','—')} ({lya:.1f})",font=F_S,fill=GREEN if pct>=0 else RED)
     else:
         d.text((x1+18,y1+245),"Awaiting NOAA solar-cycle history feed...",font=F_XS,fill=STEEL_DK)
-    with img_lock:
-        mag_thumb=REAL_IMAGES.get("magnetogram")
     tcx,tcy,tr=x2-165,y1+(y2-y1)//2,110
     d.ellipse((tcx-tr,tcy-tr,tcx+tr,tcy+tr),fill=(15,15,15),outline=(70,70,70),width=1)
-    if mag_thumb is not None:
-        disk=mag_thumb.resize((tr*2,tr*2),Image.LANCZOS)
+    disk=get_resized("magnetogram",tr*2)
+    if disk is not None:
         img.paste(disk,(tcx-tr,tcy-tr),disk)
         d=ImageDraw.Draw(img)
     d.text((tcx-tr,tcy+tr+8),"SDO/HMI MAGNETOGRAM",font=F_XXS,fill=STEEL_DK)
@@ -1248,15 +1409,13 @@ def dashboard6(n):
     x1,y1,x2,y2=rowB
     paste_vertical_label(img,x1+6,y1+30,"Solar Dynamics Observatory",font(20,True),WHITE)
     d=ImageDraw.Draw(img)
-    with img_lock:
-        mag=REAL_IMAGES.get("magnetogram"); cont=REAL_IMAGES.get("continuum")
     r2=110
     c1x,c1y=x1+175,(y1+y2)//2
     c2x,c2y=x2-160,(y1+y2)//2
-    for (cxp,cyp,im,lab) in [(c1x,c1y,mag,"MAGNETOGRAM"),(c2x,c2y,cont,"CONTINUUM (VISIBLE LIGHT)")]:
+    for (cxp,cyp,key,lab) in [(c1x,c1y,"magnetogram","MAGNETOGRAM"),(c2x,c2y,"continuum","CONTINUUM (VISIBLE LIGHT)")]:
         d.ellipse((cxp-r2,cyp-r2,cxp+r2,cyp+r2),fill=(15,15,15),outline=(70,70,70),width=1)
-        if im is not None:
-            disk=im.resize((r2*2,r2*2),Image.LANCZOS)
+        disk=get_resized(key,r2*2)
+        if disk is not None:
             img.paste(disk,(cxp-r2,cyp-r2),disk)
             d=ImageDraw.Draw(img)
         d.text((cxp-r2,cyp+r2+8),lab,font=F_XXS,fill=STEEL_DK)
@@ -1373,7 +1532,7 @@ def prepare_music_playlist():
                 "-vn", "-c:a", "aac", "-b:a", "128k",
                 "-ar", "44100", "-ac", "2",
                 tmp_m4a
-            ], check=True)
+            ], check=True, timeout=180)
             if os.path.getsize(tmp_m4a) < 4096:
                 raise RuntimeError("FFmpeg produced an empty/invalid audio file")
             os.replace(tmp_m4a, normalized)
@@ -1403,7 +1562,7 @@ def prepare_music_playlist():
         "-f", "concat", "-safe", "0", "-i", MUSIC_PLAYLIST,
         "-vn", "-c:a", "aac", "-b:a", "128k",
         "-ar", "44100", "-ac", "2", tmp_loop
-    ], check=True)
+    ], check=True, timeout=300)
     if os.path.getsize(tmp_loop) < 4096:
         raise RuntimeError("Merged music loop file is empty/invalid")
     os.replace(tmp_loop, MUSIC_LOOP_FILE)
@@ -1418,6 +1577,7 @@ def main():
         print("ERROR: YOUTUBE_KEY GitHub secret is missing.",flush=True); sys.exit(1)
     threading.Thread(target=worker,daemon=True).start()
     threading.Thread(target=image_worker,daemon=True).start()
+    threading.Thread(target=video_worker,daemon=True).start()
     time.sleep(3)
     stream_url=YOUTUBE_RTMP.rstrip("/")+"/"+YOUTUBE_KEY
     music_playlist = prepare_music_playlist()
